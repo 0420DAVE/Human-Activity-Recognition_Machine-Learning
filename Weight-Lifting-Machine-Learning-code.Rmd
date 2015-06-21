@@ -1,0 +1,179 @@
+---
+title: "PML Assignment 1"
+author: "Li Ying"
+date: "16 June 2015"
+output: html_document
+---
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, ** but they rarely quantify how well they do it **. 
+
+In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## What you should submit
+
+The goal of your project is to predict the manner in which they did the exercise. This is the **classe** variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+1. Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+2. You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+## Reproducibility 
+
+Due to security concerns with the exchange of R code, your code will not be run during the evaluation by your classmates. Please be sure that if they download the repo, they will be able to view the compiled HTML version of your analysis. 
+
+
+```{r global_options, message=FALSE, echo=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figs/', warning=FALSE, message=FALSE)
+
+library(caret)
+require("e1071")
+library(plyr)
+```
+
+## Download Data 
+```{r}
+setwd("~/Documents/## Github Repo/Human-Activity-Recognition_Machine-Learning")
+library(caret)
+url1<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url2<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# Create a folder called data
+if(!file.exists("data")){dir.create("data")}
+
+# Download training and testing file to data 
+#download.file(url1,destfile="./data/training.csv",method="curl")
+#download.file(url2,destfile="./data/testing.csv",method="curl")
+
+# Read data into R
+training<-read.csv("./data/training.csv")
+testing<-read.csv("./data/testing.csv")
+
+
+set.seed(3456)
+inTrain <- createDataPartition(training$classe, p=0.7, list=FALSE)
+training <- training[inTrain,]
+testing <- training[-inTrain,]
+
+```
+
+## Explore data 
+```{r explore}
+length(names(training))
+
+table(sapply(colnames(training),FUN=function(x){class(training[,x])}))
+
+# table(apply(training,2,class))
+```
+
+Missing values
+```{r}
+# Compute the sum of NA of each column
+rowNA<-apply(is.na(training),1,sum)
+table(rowNA)
+# Therefore, we have 406 out of 19622 observations that is complete in every column
+
+colNA<-apply(is.na(training),2,sum)
+table(colNA)
+# There are 93 columns that have no NAs
+```
+
+## Reduce dataset
+Take away the NA columns
+```{r}
+numColNA<-data.frame(col_name=names(training),NAcount=colSums(is.na(training)),row.names=NULL)
+validColNames<-subset(numColNA,NAcount==0,row.names=NULL)$col_name
+noNA<-training[,names(training)%in%validColNames]
+```
+
+Remove varaibles with near zero variance
+```{r}
+nzv<-nearZeroVar(noNA)
+noNA_zv<-noNA[,-nzv]
+```
+
+Deal with variables of high correlations
+```{r}
+table(sapply(colnames(noNA_zv),FUN=function(x){class(training[,x])}))
+# cor() does not work on factors
+
+# get the column names that is not character
+x<-factor()
+for (i in names(noNA_zv)){x<-c(x,class(noNA_zv[,i]))}                  
+colClass<-data.frame(col_names=names(noNA_zv),class=x)
+
+noFactorNames<-subset(colClass,!class=="factor")$col_names
+
+# convert rest data to interger 
+noFactor<-noNA_zv[, noFactorNames]
+for (i in 1:dim(noFactor)[2]){
+  noFactor[,i]<-as.numeric(noFactor[,i])
+}
+
+cor_training <- cor(noFactor)
+# find highly correlated descriptors, return a vector of intergers correspondng to columns to remove to reduce pair-wise correlations
+corrDescr <- findCorrelation(cor_training, cutoff = 0.75)
+noFactorNames[corrDescr]
+
+noNA_zv_cor<- noNA_zv[,!names(noNA_zv) %in% noFactorNames[corrDescr]]
+```
+
+We can see that there are a factor variable called user_name, a variable X which is simply the row number and finally num_window. Let’s remove them since they are irrelevant.
+```{r}
+noNA_zv_cor <- noNA_zv_cor[, !(names(noNA_zv_cor) %in% c('user_name', 'X', 'num_window'))]
+
+table(sapply(noNA_zv_cor,class))
+```
+
+
+## Training
+Because `class` is a factor variable we will need to train a classifier and since it has more than two levels, we cannot use Generalized Linear Models (glm). 
+
+Instead we have to use more advanced classifiers. More specifically classification and regression trees (CART), stochastic gradient boosting and random forest. All classifiers will be trained using 5-fold Cross Validation to reduce model overfitting and to estimate the out of sample error during training. We expect this estimate to be close to the final out of sample error that we will calculate later on using the test dataset. Our metric will be accuracy.
+
+```{r}
+trControl <- trainControl(method="cv", number=5)
+```
+
+### 1. CART (rpart)
+```{r}
+noNA_zv_cor_rpart <- train(classe ~ ., data = noNA_zv_cor, method='rpart', trControl = trControl)
+
+noNA_zv_cor_rpart$results[1,]
+```
+
+#### Result
+```{r}
+pred_rpart <- predict(noNA_zv_cor_rpart, testing)
+cm_rpart <- confusionMatrix(pred_rpart, testing$classe)
+cm_rpart
+```
+
+Out of sample error measured by accuracy is 0.4233. During training, this was estimated to be 0.5293. This classifier does not perform well.
+
+
+### 2. Random Forest (parRF)
+```{r}
+library(randomForest)
+noNA_zv_cor_rf <- randomForest(classe ~ ., data = noNA_zv_cor)
+
+noNA_zv_cor_rf
+```
+
+### Result
+```{r}
+prediction3<-predict(noNA_zv_cor_rf ,testing)
+confusionMatrix(prediction3,testing$classe)
+
+```
+
+The accuracy is close to 100%. In the training set, out of sample rate is 0.58%
+
+### Summary
+To summarize we used the caret R package to split the data into two datasets for training and testing. We then preprocessed the training dataset using several techniques (missing values, near zero values, linear correlations) and managed to reduce the number of variables to 35. Then we trained three different classifiers using the CART, Random Forest and Boosting methods (unsucessful attempt). From these three classifiers, the one based on random forests performed significantly better with accuracy close to 100% on the test dataset.
+
+
+
+
+
+
